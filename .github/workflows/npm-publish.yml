@@ -11,6 +11,11 @@ jobs:
     # "Release <version>" (e.g. the squash-merge of a release PR).
     if: startsWith(github.event.head_commit.message, 'Release ')
     permissions:
+      # id-token: write lets the workflow mint an OIDC token so npm can
+      # authenticate the publish via Trusted Publishing (no NPM token needed)
+      # and attach a provenance attestation.
+      id-token: write
+      # contents: write lets the "Tag the release" step push the git tag.
       contents: write
     steps:
       - name: Checkout repository
@@ -18,18 +23,19 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+      - name: Upgrade npm (Trusted Publishing needs npm >= 11.5.1)
+        run: npm install -g npm@latest
       - name: Install dependencies
         run: npm install
       - name: Run tests
         run: npx vitest run
-      - name: Publish to npm
-        # `npm publish` (unlike `yarn publish`) handles the first-ever publish of
-        # a new package name, which `yarn` aborts on with a registry 404.
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN }}
+      - name: Publish to npm (Trusted Publishing + provenance)
+        # No NODE_AUTH_TOKEN: authentication happens over OIDC against the
+        # trusted publisher registered for this package on npmjs.com
+        # (repo iopsystems/h2histogram-js, workflow npm-publish.yml).
+        run: npm publish --access public --provenance
       - name: Tag the release
         run: |
           VERSION="v$(node -p "require('./package.json').version")"
