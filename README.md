@@ -114,3 +114,15 @@ cumulative.percentile(0.999);
 | `CumulativeHistogram` | Read-only cumulative form (crate's `CumulativeROHistogram`); binary-search `percentile(s)`, `mean`, `bucketQuantileRange`, `iterWithQuantiles` |
 | `Bucket` | A bucket's `count` and inclusive `[start, end]` range, plus `midpoint`/`width` |
 | `H2Encoding`, `H2HistogramBuilder`, `H2Histogram`, `encode32`, `decode32` | The original `{ a, b, n }` API (unchanged) |
+
+## Related implementations
+
+The h2 histogram bucketing is implemented in several languages, all producing
+byte-for-byte identical buckets so histograms interoperate across them:
+
+- [**Rust**](https://github.com/iopsystems/histogram) — the canonical
+  implementation (`histogram` crate)
+- [**Python**](https://github.com/iopsystems/h2histogram-py)
+- [**Go**](https://github.com/iopsystems/h2histogram-go)
+- [**JavaScript**](https://github.com/iopsystems/h2histogram-js) — this
+  repository (values up to `2^53 - 1`)
