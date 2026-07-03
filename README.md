@@ -105,6 +105,18 @@ cumulative.percentile(0.999);
 | `Bucket` | A bucket's `count` and inclusive `[start, end]` range, plus `midpoint`/`width` |
 | `H2Encoding`, `H2HistogramBuilder`, `H2Histogram`, `encode32`, `decode32` | The original `{ a, b, n }` API (unchanged) |
 
+## Examples
+
+Runnable examples live in [`examples/`](examples):
+
+- [`basic_usage.js`](examples/basic_usage.js) — record a distribution and query percentiles
+- [`cumulative_quantiles.js`](examples/cumulative_quantiles.js) — fast repeated quantiles, mean, and per-bucket quantile spans via `CumulativeHistogram`
+- [`interop_columnar.js`](examples/interop_columnar.js) — load a histogram from columnar `(index, count)` data (the Rezolus / cross-language storage form)
+
+```bash
+node examples/basic_usage.js
+```
+
 ## Related implementations
 
 The h2 histogram bucketing is implemented in several languages, all producing

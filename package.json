@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "h2-histogram",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "The H2Histogram provides a histogram that is conceptually similar to HdrHistogram, but noticeably faster due to the use of base-2 buckets and efficient bit operations. Byte-for-byte compatible with the iopsystems histogram Rust crate and its Python/Go ports.",
   "main": "src/index.js",
   "scripts": {
