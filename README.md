@@ -1,13 +1,3 @@
-# h2histogram
-
-> **Renamed:** this package was previously published as
-> [`h2-histogram`](https://www.npmjs.com/package/h2-histogram). It now lives at
-> [`h2histogram`](https://www.npmjs.com/package/h2histogram) to match the
-> [Python](https://github.com/iopsystems/h2histogram-py) and
-> [Go](https://github.com/iopsystems/h2histogram-go) packages. Install with
-> `npm install h2histogram`; the old `h2-histogram` package is deprecated and
-> will not receive further updates.
-
 The H2Histogram provides a histogram that is conceptually similar to
 [HdrHistogram](http://hdrhistogram.org) but with base-2 buckets, which makes it
 noticeably faster. This introduces small modifications to the configurable
@@ -58,7 +48,7 @@ bucketing is identical across all implementations.
 ## Canonical API quick start
 
 ```js
-import { Histogram } from 'h2histogram';
+import { Histogram } from 'h2-histogram';
 
 const h = new Histogram(7, 53); // groupingPower, maxValuePower (default 53)
 h.increment(42);
@@ -96,7 +86,7 @@ for (const [bucket, lo, hi] of c.iterWithQuantiles()) {
 ### Interop with columnar (Rezolus) data
 
 ```js
-import { Config, SparseHistogram, CumulativeHistogram } from 'h2histogram';
+import { Config, SparseHistogram, CumulativeHistogram } from 'h2-histogram';
 
 const config = new Config(3, 53);                 // Rezolus-style config
 const sparse = SparseHistogram.fromParts(config, bucketIndices, bucketCounts);
