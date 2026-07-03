@@ -4,8 +4,28 @@
 by the [`npm-publish.yml`](.github/workflows/npm-publish.yml) GitHub Actions
 workflow. The workflow runs on pushes to `main` and publishes **only when the
 head commit message starts with `Release `** (e.g. the squash-merge of a release
-PR). It authenticates with the `NPM_AUTH_TOKEN` repository secret, which must be
-a token allowed to publish this package.
+PR).
+
+It authenticates with npm **[Trusted Publishing](https://docs.npmjs.com/trusted-publishers)**
+(OIDC) — there is **no npm token** stored as a repository secret. The workflow
+mints a short-lived OIDC identity token that npm verifies against the trusted
+publisher registered for this package, and it attaches a
+[provenance attestation](https://docs.npmjs.com/generating-provenance-statements)
+to each publish.
+
+### One-time setup (Trusted Publishing)
+
+On [npmjs.com → the `h2-histogram` package → Settings](https://www.npmjs.com/package/h2-histogram/access),
+under **Trusted Publisher**, add a GitHub Actions publisher:
+
+| Field           | Value                        |
+|-----------------|------------------------------|
+| Organization    | `iopsystems`                 |
+| Repository      | `h2histogram-js`             |
+| Workflow name   | `npm-publish.yml`            |
+| Environment     | *(leave blank)*              |
+
+Once registered, the `NPM_AUTH_TOKEN` repository secret can be deleted.
 
 ## Cutting a release
 
@@ -20,8 +40,9 @@ a token allowed to publish this package.
    Release 1.2.0
    ```
 
-   When it hits `main`, the workflow installs, runs the tests, runs
-   `npm publish --access public`, and pushes a `v<version>` git tag.
+   When it hits `main`, the workflow installs, runs the tests, publishes via
+   Trusted Publishing (`npm publish --access public --provenance`), and pushes a
+   `v<version>` git tag.
 3. **Verify.** Within a minute or so:
 
    ```bash
