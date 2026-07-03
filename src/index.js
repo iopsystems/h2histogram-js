@@ -568,3 +568,772 @@ function assertSafeInteger(x) {
 function assertDefined(x) {
   assert(x !== undefined, 'expected a defined value, got undefined');
 };
+
+// ---------------------------------------------------------------------------
+// Canonical-compatible API
+// ---------------------------------------------------------------------------
+//
+// The types below mirror the iopsystems `histogram` crate (the canonical Rust
+// implementation) and its Python and Go ports, using the same
+// `groupingPower` / `maxValuePower` parameters and the same `Config`,
+// `Histogram`, `SparseHistogram`, `CumulativeHistogram` and `Bucket` surface.
+//
+// In the crate's terms, the linear region always uses width-1 buckets, which
+// corresponds to `a = 0` in the `H2Encoding` above. So a canonical `Config`
+// with `groupingPower = g` and `maxValuePower = n` is exactly
+// `new H2Encoding({ a: 0, b: g, n })`, and this layer reuses that
+// (property-tested) encoding to guarantee byte-for-byte identical bucketing.
+//
+// The one deviation from the canonical implementation is the value range:
+// JavaScript numbers are 64-bit floats, so the largest `maxValuePower` we
+// support is 53 (values up to 2^53 - 1) rather than 64.
+
+/** The largest `maxValuePower` representable with 64-bit float integers. */
+export const MAX_VALUE_POWER = 53;
+
+/**
+ * Immutable bucketing configuration, equivalent to the crate's `Config`.
+ *
+ * Construct with `Config.new(groupingPower, maxValuePower)`.
+ */
+export class Config {
+  /**
+   * @param {number} groupingPower - number of buckets spanning each power of
+   *   two; the relative error is `2^-groupingPower`.
+   * @param {number} [maxValuePower] - largest representable value is
+   *   `2^maxValuePower - 1` (default 53, the JS maximum).
+   */
+  constructor(groupingPower, maxValuePower = MAX_VALUE_POWER) {
+    assertSafeInteger(groupingPower);
+    assertSafeInteger(maxValuePower);
+    assert(maxValuePower <= MAX_VALUE_POWER, () => `max_value_power must be <= ${MAX_VALUE_POWER}, got ${maxValuePower}`);
+    assert(groupingPower >= 0 && maxValuePower >= 0, () => `grouping_power and max_value_power must be non-negative`);
+    assert(groupingPower < maxValuePower, () => `grouping_power (${groupingPower}) must be less than max_value_power (${maxValuePower})`);
+
+    this.groupingPower = groupingPower;
+    this.maxValuePower = maxValuePower;
+    // The linear region uses width-1 buckets, i.e. a = 0 in H2Encoding terms.
+    this.encoding = new H2Encoding({ a: 0, b: groupingPower, n: maxValuePower });
+    this.cutoffPower = groupingPower + 1;
+    this.cutoffValue = 2 ** this.cutoffPower;
+    this.max = this.encoding.maxValue();
+  }
+
+  /**
+   * Create and validate a Config. Mirrors the crate's constructor.
+   * @param {number} groupingPower
+   * @param {number} [maxValuePower]
+   */
+  static new(groupingPower, maxValuePower = MAX_VALUE_POWER) {
+    return new Config(groupingPower, maxValuePower);
+  }
+
+  /**
+   * Infer a config from a known bucket count and `maxValuePower`. Useful for
+   * dense columns that store only the counts. Throws if no grouping power
+   * produces `totalBuckets`.
+   * @param {number} totalBuckets
+   * @param {number} [maxValuePower]
+   */
+  static fromTotalBuckets(totalBuckets, maxValuePower = MAX_VALUE_POWER) {
+    for (let groupingPower = 0; groupingPower < maxValuePower; groupingPower++) {
+      const candidate = new Config(groupingPower, maxValuePower);
+      if (candidate.totalBuckets === totalBuckets) {
+        return candidate;
+      }
+    }
+    throw new Error(`no grouping_power with max_value_power=${maxValuePower} yields ${totalBuckets} buckets`);
+  }
+
+  /** Total number of buckets for this configuration. */
+  get totalBuckets() {
+    return this.encoding.numBins();
+  }
+
+  /**
+   * Relative error (as a percentage) of the logarithmic buckets. Linear
+   * buckets have width 1 and no error; a config with no logarithmic buckets
+   * has zero error.
+   */
+  error() {
+    if (this.groupingPower === this.maxValuePower - 1) {
+      return 0.0;
+    }
+    return 100.0 / 2 ** this.groupingPower;
+  }
+
+  /**
+   * Return the bucket index that `value` falls into. Throws if the value is
+   * out of range.
+   * @param {number} value
+   */
+  valueToIndex(value) {
+    return this.encoding.encode(value);
+  }
+
+  /**
+   * Inclusive lower bound of the bucket at `index`.
+   * @param {number} index
+   */
+  indexToLowerBound(index) {
+    return this.encoding.lower(index);
+  }
+
+  /**
+   * Inclusive upper bound of the bucket at `index`.
+   * @param {number} index
+   */
+  indexToUpperBound(index) {
+    return this.encoding.upper(index);
+  }
+
+  /**
+   * Inclusive `[lower, upper]` range for the bucket at `index`.
+   * @param {number} index
+   */
+  indexToRange(index) {
+    return [this.indexToLowerBound(index), this.indexToUpperBound(index)];
+  }
+
+  /**
+   * @param {Config} other
+   */
+  equals(other) {
+    return other instanceof Config
+      && this.groupingPower === other.groupingPower
+      && this.maxValuePower === other.maxValuePower;
+  }
+}
+
+/**
+ * A single histogram bucket: a count and an inclusive value range.
+ */
+export class Bucket {
+  /**
+   * @param {number} count
+   * @param {number} start - inclusive lower bound
+   * @param {number} end - inclusive upper bound
+   */
+  constructor(count, start, end) {
+    this.count = count;
+    this.start = start;
+    this.end = end;
+  }
+
+  /** The inclusive `[start, end]` range of the bucket. */
+  get range() {
+    return [this.start, this.end];
+  }
+
+  /** Arithmetic midpoint of the range; a reasonable point estimate. */
+  get midpoint() {
+    return (this.start + this.end) / 2;
+  }
+
+  /** Number of distinct integer values the bucket covers. */
+  get width() {
+    return this.end - this.start + 1;
+  }
+}
+
+/**
+ * A dense h2 histogram with a counter for every bucket.
+ *
+ * This is the JS analogue of the crate's `Histogram`. Counts are stored in a
+ * `Float64Array`, so per-bucket counts are exact up to 2^53.
+ */
+export class Histogram {
+  /**
+   * @param {number} groupingPower
+   * @param {number} [maxValuePower]
+   * @param {{ config?: Config }} [options]
+   */
+  constructor(groupingPower, maxValuePower = MAX_VALUE_POWER, { config } = {}) {
+    this.config = config ?? new Config(groupingPower, maxValuePower);
+    this.buckets = new Float64Array(this.config.totalBuckets);
+  }
+
+  /**
+   * Create an empty histogram from an existing Config.
+   * @param {Config} config
+   */
+  static withConfig(config) {
+    return new Histogram(config.groupingPower, config.maxValuePower, { config });
+  }
+
+  /**
+   * Create a histogram from a full, dense list of bucket counts.
+   * @param {number} groupingPower
+   * @param {number} maxValuePower
+   * @param {number[] | Float64Array} buckets
+   */
+  static fromBuckets(groupingPower, maxValuePower, buckets) {
+    const config = new Config(groupingPower, maxValuePower);
+    assert(buckets.length === config.totalBuckets, () => `expected ${config.totalBuckets} buckets, got ${buckets.length}`);
+    const h = Histogram.withConfig(config);
+    h.buckets.set(buckets);
+    return h;
+  }
+
+  /** Total number of observations recorded. */
+  totalCount() {
+    let total = 0;
+    for (let i = 0; i < this.buckets.length; i++) {
+      total += this.buckets[i];
+    }
+    return total;
+  }
+
+  /**
+   * Add one observation of `value` (or `count` observations).
+   * @param {number} value
+   * @param {number} [count]
+   */
+  increment(value, count = 1) {
+    this.buckets[this.config.valueToIndex(value)] += count;
+  }
+
+  /**
+   * Add `count` observations of `value`. Alias for `increment`.
+   * @param {number} value
+   * @param {number} [count]
+   */
+  record(value, count = 1) {
+    this.increment(value, count);
+  }
+
+  /**
+   * Record many values at once. If `counts` is provided it must be the same
+   * length as `values` and supplies a weight for each value.
+   * @param {Iterable<number>} values
+   * @param {Iterable<number>} [counts]
+   */
+  recordMany(values, counts) {
+    if (counts !== undefined) {
+      const vi = values[Symbol.iterator]();
+      const ci = counts[Symbol.iterator]();
+      while (true) {
+        const v = vi.next();
+        const c = ci.next();
+        if (v.done || c.done) break;
+        this.record(v.value, c.value);
+      }
+      return;
+    }
+    for (const value of values) {
+      this.increment(value);
+    }
+  }
+
+  /** Iterate every bucket (including empty ones) as `Bucket` objects. */
+  *[Symbol.iterator]() {
+    for (let i = 0; i < this.buckets.length; i++) {
+      const [start, end] = this.config.indexToRange(i);
+      yield new Bucket(this.buckets[i], start, end);
+    }
+  }
+
+  /** Return only the buckets with a non-zero count. */
+  nonzeroBuckets() {
+    const out = [];
+    for (let i = 0; i < this.buckets.length; i++) {
+      if (this.buckets[i] > 0) {
+        const [start, end] = this.config.indexToRange(i);
+        out.push(new Bucket(this.buckets[i], start, end));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * @param {Histogram} other
+   */
+  _checkCompatible(other) {
+    assert(this.config.equals(other.config), () => `histograms have incompatible configurations`);
+  }
+
+  /**
+   * Return a new histogram that is the element-wise sum of both. Both must
+   * share the same configuration.
+   * @param {Histogram} other
+   */
+  merge(other) {
+    this._checkCompatible(other);
+    const result = Histogram.withConfig(this.config);
+    for (let i = 0; i < this.buckets.length; i++) {
+      result.buckets[i] = this.buckets[i] + other.buckets[i];
+    }
+    return result;
+  }
+
+  /**
+   * Return a new histogram that is the element-wise difference. Throws if any
+   * bucket would go negative.
+   * @param {Histogram} other
+   */
+  subtract(other) {
+    this._checkCompatible(other);
+    const result = Histogram.withConfig(this.config);
+    for (let i = 0; i < this.buckets.length; i++) {
+      const diff = this.buckets[i] - other.buckets[i];
+      assert(diff >= 0, () => `subtraction would produce a negative bucket count`);
+      result.buckets[i] = diff;
+    }
+    return result;
+  }
+
+  /**
+   * Return a coarser histogram with a smaller `groupingPower`. The new
+   * grouping power must be strictly less than the current one.
+   * @param {number} groupingPower
+   */
+  downsample(groupingPower) {
+    assert(groupingPower < this.config.groupingPower, () => `target grouping_power must be less than the current grouping_power`);
+    const result = new Histogram(groupingPower, this.config.maxValuePower);
+    for (let i = 0; i < this.buckets.length; i++) {
+      const count = this.buckets[i];
+      if (count > 0) {
+        result.record(this.config.indexToLowerBound(i), count);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Return the bucket at a single `percentile` in [0, 1], or `null` if the
+   * histogram is empty. `0.5` is the median (same convention as the crate).
+   * @param {number} percentile
+   */
+  percentile(percentile) {
+    const result = this.percentiles([percentile]);
+    return result === null ? null : result[0][1];
+  }
+
+  /**
+   * Return `[percentile, Bucket]` pairs for each requested percentile, in the
+   * original order. Returns `null` if the histogram is empty.
+   * @param {number[]} percentiles
+   * @returns {[number, Bucket][] | null}
+   */
+  percentiles(percentiles) {
+    for (const p of percentiles) {
+      assert(p >= 0 && p <= 1, () => `percentiles must be in the range [0, 1], got ${p}`);
+    }
+    const total = this.totalCount();
+    if (total === 0) {
+      return null;
+    }
+
+    const sortedUnique = Array.from(new Set(percentiles)).sort((x, y) => x - y);
+    /** @type {Map<number, Bucket>} */
+    const results = new Map();
+    let bucketIdx = 0;
+    let partialSum = this.buckets[0];
+
+    for (const p of sortedUnique) {
+      const target = Math.max(1, Math.ceil(p * total));
+      while (true) {
+        if (partialSum >= target || bucketIdx === this.buckets.length - 1) {
+          const [start, end] = this.config.indexToRange(bucketIdx);
+          results.set(p, new Bucket(this.buckets[bucketIdx], start, end));
+          break;
+        }
+        bucketIdx += 1;
+        partialSum += this.buckets[bucketIdx];
+      }
+    }
+
+    /** @type {[number, Bucket][]} */
+    const out = [];
+    for (const p of percentiles) {
+      out.push([p, /** @type {Bucket} */ (results.get(p))]);
+    }
+    return out;
+  }
+
+  /**
+   * Alias for `percentile` (the crate uses `quantile`).
+   * @param {number} quantile
+   */
+  quantile(quantile) {
+    return this.percentile(quantile);
+  }
+
+  /** Convert to the sparse (columnar) representation. */
+  toSparse() {
+    return SparseHistogram.fromHistogram(this);
+  }
+
+  /** Convert to a read-only cumulative histogram for fast quantiles. */
+  toCumulative() {
+    return CumulativeHistogram.fromHistogram(this);
+  }
+
+  /**
+   * @param {Histogram} other
+   */
+  equals(other) {
+    if (!(other instanceof Histogram) || !this.config.equals(other.config)) {
+      return false;
+    }
+    if (this.buckets.length !== other.buckets.length) {
+      return false;
+    }
+    for (let i = 0; i < this.buckets.length; i++) {
+      if (this.buckets[i] !== other.buckets[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+}
+
+/**
+ * Sparse, columnar representation storing only non-zero buckets as parallel
+ * `index` / `count` arrays in ascending index order. Equivalent to the crate's
+ * `SparseHistogram` and the form Rezolus uses for its columnar layout.
+ */
+export class SparseHistogram {
+  /**
+   * @param {Config} config
+   * @param {number[]} index
+   * @param {number[]} count
+   */
+  constructor(config, index = [], count = []) {
+    this.config = config;
+    this.index = index;
+    this.count = count;
+  }
+
+  /**
+   * Build a sparse histogram from a dense Histogram.
+   * @param {Histogram} histogram
+   */
+  static fromHistogram(histogram) {
+    const index = [];
+    const count = [];
+    for (let i = 0; i < histogram.buckets.length; i++) {
+      const c = histogram.buckets[i];
+      if (c > 0) {
+        index.push(i);
+        count.push(c);
+      }
+    }
+    return new SparseHistogram(histogram.config, index, count);
+  }
+
+  /**
+   * Create a sparse histogram from raw parts, validating invariants.
+   * @param {Config} config
+   * @param {number[] | Uint32Array} index
+   * @param {number[] | Float64Array} count
+   */
+  static fromParts(config, index, count) {
+    assert(index.length === count.length, () => `index and count must have the same length`);
+    const total = config.totalBuckets;
+    let prev = -1;
+    for (const i of index) {
+      assert(i >= 0 && i < total, () => `index ${i} out of range for config`);
+      assert(i > prev, () => `indices must be strictly ascending`);
+      prev = i;
+    }
+    return new SparseHistogram(config, Array.from(index), Array.from(count));
+  }
+
+  get length() {
+    return this.index.length;
+  }
+
+  isEmpty() {
+    return this.index.length === 0;
+  }
+
+  totalCount() {
+    let total = 0;
+    for (const c of this.count) {
+      total += c;
+    }
+    return total;
+  }
+
+  /** Iterate non-zero buckets as `Bucket` objects. */
+  *[Symbol.iterator]() {
+    for (let k = 0; k < this.index.length; k++) {
+      const [start, end] = this.config.indexToRange(this.index[k]);
+      yield new Bucket(this.count[k], start, end);
+    }
+  }
+
+  /** Convert to a dense Histogram. */
+  toDense() {
+    const h = Histogram.withConfig(this.config);
+    for (let k = 0; k < this.index.length; k++) {
+      h.buckets[this.index[k]] = this.count[k];
+    }
+    return h;
+  }
+
+  /** Convert to a read-only CumulativeHistogram. */
+  toCumulative() {
+    return CumulativeHistogram.fromSparse(this);
+  }
+
+  /**
+   * @param {number} percentile
+   */
+  percentile(percentile) {
+    return this.toDense().percentile(percentile);
+  }
+
+  /**
+   * @param {number[]} percentiles
+   */
+  percentiles(percentiles) {
+    return this.toDense().percentiles(percentiles);
+  }
+}
+
+/**
+ * Read-only histogram with cumulative counts for fast quantile queries.
+ * Corresponds to the crate's `CumulativeROHistogram`: it stores only non-zero
+ * buckets, but `count[i]` is the running prefix sum, so percentile queries are
+ * answered with a binary search (O(log n)). A midpoint-estimated `mean` is
+ * computed once at construction.
+ */
+export class CumulativeHistogram {
+  /**
+   * @param {Config} config
+   * @param {number[]} index
+   * @param {number[]} count - cumulative (prefix-sum) counts
+   * @param {{ validate?: boolean }} [options]
+   */
+  constructor(config, index, count, { validate = true } = {}) {
+    this.config = config;
+    this.index = index;
+    this.count = count;
+    if (validate) {
+      this._validate();
+    }
+    this._mean = this._computeMean();
+  }
+
+  /**
+   * Create from raw parts. `count` must be cumulative (prefix sums).
+   * @param {Config} config
+   * @param {number[]} index
+   * @param {number[]} count
+   */
+  static fromParts(config, index, count) {
+    return new CumulativeHistogram(config, Array.from(index), Array.from(count));
+  }
+
+  /**
+   * Build from a dense Histogram.
+   * @param {Histogram} histogram
+   */
+  static fromHistogram(histogram) {
+    const index = [];
+    const count = [];
+    let running = 0;
+    for (let i = 0; i < histogram.buckets.length; i++) {
+      const n = histogram.buckets[i];
+      if (n > 0) {
+        running += n;
+        index.push(i);
+        count.push(running);
+      }
+    }
+    return new CumulativeHistogram(histogram.config, index, count, { validate: false });
+  }
+
+  /**
+   * Build from a SparseHistogram.
+   * @param {SparseHistogram} sparse
+   */
+  static fromSparse(sparse) {
+    const index = Array.from(sparse.index);
+    const count = [];
+    let running = 0;
+    for (const n of sparse.count) {
+      running += n;
+      count.push(running);
+    }
+    return new CumulativeHistogram(sparse.config, index, count, { validate: false });
+  }
+
+  _validate() {
+    assert(this.index.length === this.count.length, () => `index and count must have the same length`);
+    const total = this.config.totalBuckets;
+    let prev = -1;
+    for (const i of this.index) {
+      assert(i >= 0 && i < total, () => `index ${i} out of range for config`);
+      assert(i > prev, () => `indices must be strictly ascending`);
+      prev = i;
+    }
+    let prevC = null;
+    for (const c of this.count) {
+      assert(c !== 0, () => `cumulative counts must be non-zero`);
+      assert(prevC === null || c >= prevC, () => `cumulative counts must be non-decreasing`);
+      prevC = c;
+    }
+  }
+
+  /**
+   * @param {number} position
+   */
+  _individualCount(position) {
+    return position === 0 ? this.count[0] : this.count[position] - this.count[position - 1];
+  }
+
+  _computeMean() {
+    if (this.count.length === 0) {
+      return null;
+    }
+    const total = this.count[this.count.length - 1];
+    if (total === 0) {
+      return null;
+    }
+    let weighted = 0;
+    for (let i = 0; i < this.index.length; i++) {
+      const [start, end] = this.config.indexToRange(this.index[i]);
+      weighted += ((start + end) / 2) * this._individualCount(i);
+    }
+    return weighted / total;
+  }
+
+  get length() {
+    return this.index.length;
+  }
+
+  isEmpty() {
+    return this.index.length === 0;
+  }
+
+  totalCount() {
+    return this.count.length === 0 ? 0 : this.count[this.count.length - 1];
+  }
+
+  /** Midpoint-estimated mean of all observations, or `null` if empty. */
+  mean() {
+    return this._mean;
+  }
+
+  /**
+   * First position whose cumulative count is >= `target`.
+   * @param {number} target
+   */
+  _findQuantilePosition(target) {
+    const pos = bisectLeft(this.count, target);
+    return Math.min(pos, this.count.length - 1);
+  }
+
+  /**
+   * Return the Bucket at `percentile` in [0, 1] (individual count), or `null`
+   * if the histogram is empty.
+   * @param {number} percentile
+   */
+  percentile(percentile) {
+    const result = this.percentiles([percentile]);
+    return result === null ? null : result[0][1];
+  }
+
+  /**
+   * Return `[percentile, Bucket]` pairs, one per requested percentile.
+   * @param {number[]} percentiles
+   * @returns {[number, Bucket][] | null}
+   */
+  percentiles(percentiles) {
+    for (const p of percentiles) {
+      assert(p >= 0 && p <= 1, () => `percentiles must be in the range [0, 1], got ${p}`);
+    }
+    if (this.count.length === 0) {
+      return null;
+    }
+    const total = this.count[this.count.length - 1];
+    if (total === 0) {
+      return null;
+    }
+    /** @type {[number, Bucket][]} */
+    const out = [];
+    for (const p of percentiles) {
+      const target = Math.max(1, Math.ceil(p * total));
+      const pos = this._findQuantilePosition(target);
+      const [start, end] = this.config.indexToRange(this.index[pos]);
+      out.push([p, new Bucket(this._individualCount(pos), start, end)]);
+    }
+    return out;
+  }
+
+  /**
+   * @param {number} quantile
+   */
+  quantile(quantile) {
+    return this.percentile(quantile);
+  }
+
+  /**
+   * Return `[lower, upper]` quantile fractions for the `bucketIdx`-th stored
+   * bucket, or `null` if empty or out of range.
+   * @param {number} bucketIdx
+   */
+  bucketQuantileRange(bucketIdx) {
+    if (bucketIdx < 0 || bucketIdx >= this.count.length) {
+      return null;
+    }
+    const total = this.count[this.count.length - 1];
+    if (total === 0) {
+      return null;
+    }
+    const lower = bucketIdx === 0 ? 0 : this.count[bucketIdx - 1] / total;
+    const upper = this.count[bucketIdx] / total;
+    return [lower, upper];
+  }
+
+  /** Iterate non-zero buckets (with individual counts) as `Bucket` objects. */
+  *[Symbol.iterator]() {
+    for (let i = 0; i < this.index.length; i++) {
+      const [start, end] = this.config.indexToRange(this.index[i]);
+      yield new Bucket(this._individualCount(i), start, end);
+    }
+  }
+
+  /** Iterate `[Bucket, lowerQuantile, upperQuantile]` per non-zero bucket. */
+  *iterWithQuantiles() {
+    const total = this.count.length === 0 ? 0 : this.count[this.count.length - 1];
+    for (let i = 0; i < this.index.length; i++) {
+      const lower = i === 0 ? 0 : this.count[i - 1] / total;
+      const upper = this.count[i] / total;
+      const [start, end] = this.config.indexToRange(this.index[i]);
+      yield [new Bucket(this._individualCount(i), start, end), lower, upper];
+    }
+  }
+
+  /** Reconstruct a dense Histogram. */
+  toDense() {
+    const h = Histogram.withConfig(this.config);
+    for (let i = 0; i < this.index.length; i++) {
+      h.buckets[this.index[i]] = this._individualCount(i);
+    }
+    return h;
+  }
+}
+
+/**
+ * Return the leftmost index at which `target` could be inserted into the sorted
+ * array `arr` to keep it sorted, i.e. the first index `i` with `arr[i] >= target`.
+ * @param {number[] | Float64Array} arr
+ * @param {number} target
+ */
+function bisectLeft(arr, target) {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (arr[mid] < target) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
