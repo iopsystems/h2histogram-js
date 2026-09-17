@@ -1,4 +1,4 @@
-The H2Histogram provides a histogram that is conceptually similar to
+The h2histogram design provides a histogram that is conceptually similar to
 [HdrHistogram](http://hdrhistogram.org) but with base-2 buckets, which makes it
 noticeably faster. This introduces small modifications to the configurable
 options as well.
@@ -119,7 +119,7 @@ node examples/basic_usage.js
 
 ## Related implementations
 
-The h2 histogram bucketing is implemented in several languages, all producing
+The h2histogram bucketing is implemented in several languages, all producing
 byte-for-byte identical buckets so histograms interoperate across them:
 
 - [**Rust**](https://github.com/iopsystems/histogram) — the canonical
