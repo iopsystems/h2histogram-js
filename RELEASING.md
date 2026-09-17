@@ -40,7 +40,8 @@ Once registered, the `NPM_AUTH_TOKEN` repository secret can be deleted.
    Release 1.2.0
    ```
 
-   When it hits `main`, the workflow installs, runs the tests, publishes via
+   When it hits `main`, the workflow installs from the frozen lockfile, runs
+   tests, type checking and the build, then publishes via
    Trusted Publishing (`npm publish --access public --provenance`), and pushes a
    `v<version>` git tag.
 3. **Verify.** Within a minute or so:
@@ -56,10 +57,13 @@ Once registered, the `NPM_AUTH_TOKEN` repository secret can be deleted.
 
 ## Publishing manually
 
-If you need to publish outside CI (e.g. from a maintainer's machine):
+If you need to publish outside CI (e.g. from a maintainer's machine), use Node 22
+and the pnpm version pinned in `package.json`:
 
 ```bash
-npm install
-npm test
+pnpm install --frozen-lockfile
+pnpm test:ci
+pnpm typecheck
+pnpm build
 npm publish --access public   # add --otp=<code> if your account enforces 2FA
 ```

@@ -13,3 +13,8 @@
 
 - Dense checked addition and drain allow disjoint views of the same backing buffer. Partial overlap is rejected; exact-alias addition remains supported and aliased drain remains rejected.
 - `percentilesInto` reuses only its mutable outer output array and replaces each tuple with a newly allocated tuple and `Bucket`. Previously returned tuples remain unchanged, including shared or frozen tuples supplied as output slots.
+
+### Development validation
+
+Pin pnpm 10.15.0, synchronize the dependency lockfile, and run frozen-lock
+installation, tests, type checking and builds in PR CI and release validation.

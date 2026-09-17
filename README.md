@@ -189,6 +189,8 @@ and ordinary garbage collection may be included. These measurements are local
 runtime evidence; they do not establish Rust-equivalent speedups or portable
 allocation-byte guarantees.
 
-Development validation for this change used dependency versions resolved from the
-existing manifest's semver ranges. The installed pnpm version could not read the
-older repository lockfile; the unrelated lockfile was left unchanged.
+Development and CI use Node 22 and the pnpm version pinned in `package.json`.
+Install dependencies with `pnpm install --frozen-lockfile`, then run
+`pnpm test:ci`, `pnpm typecheck`, and `pnpm build`. PR/main checks and release
+validation use the same lockfile. When deliberately updating dependencies, use
+the pinned pnpm and commit both manifest and lockfile changes together.
