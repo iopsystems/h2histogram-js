@@ -20,6 +20,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -28,9 +29,13 @@ jobs:
       - name: Upgrade npm (Trusted Publishing needs npm >= 11.5.1)
         run: npm install -g npm@latest
       - name: Install dependencies
-        run: npm install
+        run: pnpm install --frozen-lockfile
       - name: Run tests
-        run: npx vitest run
+        run: pnpm test:ci
+      - name: Type check
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build
       - name: Publish to npm (Trusted Publishing + provenance)
         # No NODE_AUTH_TOKEN: authentication happens over OIDC against the
         # trusted publisher registered for this package on npmjs.com
